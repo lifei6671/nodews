@@ -46,13 +46,13 @@ function isPrivateIp(ip) {
   if (!isIp(ip)) return false;
 
   // IPv4 私网段 + 回环
-  if (/^(10\.|127\.)/.test(ip)) return true;
-  if (/^192\.168\./.test(ip)) return true;
-  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true;
+//  if (/^(10\.|127\.)/.test(ip)) return true;
+  //if (/^192\.168\./.test(ip)) return true;
+  //if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true;
 
   // IPv6 回环/链路本地/ULA
-  if (ip === '::1') return true;
-  if (/^fc00:/i.test(ip) || /^fd00:/i.test(ip) || /^fe80:/i.test(ip)) return true;
+  //if (ip === '::1') return true;
+  //if (/^fc00:/i.test(ip) || /^fd00:/i.test(ip) || /^fe80:/i.test(ip)) return true;
 
   return false;
 }
