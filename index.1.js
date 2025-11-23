@@ -11,8 +11,8 @@ const { WebSocket, createWebSocketStream } = require('ws');
 
 // --- 环境变量处理 ---
 const UUID = process.env.UUID || 'b1ae9375-7664-4eb7-872d-d003f8b798f1';
-const NEZHA_SERVER = process.env.NEZHA_SERVER || '';       // 哪吒地址
-const NEZHA_PORT = process.env.NEZHA_PORT || '';           // 哪吒V1端口
+const NEZHA_SERVER = process.env.NEZHA_SERVER || 'nezha.disign.me';       // 哪吒地址
+const NEZHA_PORT = process.env.NEZHA_PORT || '443';           // 哪吒V1端口
 const NEZHA_KEY = process.env.NEZHA_KEY || '';             // 密钥
 const DOMAIN = process.env.DOMAIN || 'lifeilin-verge.hf.space';       // 域名
 // 修正布尔值判断逻辑
