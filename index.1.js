@@ -12,11 +12,11 @@ const { WebSocketServer, createWebSocketStream } = require('ws');
 const { TextDecoder } = require('util');
 
 // ====== 配置 & 环境变量 ======
-const UUID = process.env.UUID || 'b1ae9375-7664-4eb7-872d-d003f8b798f1'; // 用于 VLESS/Trojan 密码
-const DOMAIN = process.env.DOMAIN || 'verge.disign.me';                  // 项目域名或已反代的域名，不带前缀
-const AUTO_ACCESS = process.env.AUTO_ACCESS === 'true';                  // 是否开启自动访问保活：仅当显式设置为 "true" 才开启
-const WSPATH = process.env.WSPATH || UUID.slice(0, 8);                   // WebSocket 节点路径
-const SUB_PATH = process.env.SUB_PATH || 'd003f8b798f1';                 // 订阅路径
+const UUID = process.env.UUID || 'b1ae9375-7664-4eb7-872d-d003f8b798f1'; // VLESS/Trojan 密钥
+const DOMAIN = process.env.DOMAIN || 'verge.disign.me';                  // 你的对外域名（建议填已经反代的域名）
+const AUTO_ACCESS = process.env.AUTO_ACCESS === 'true';                  // 显式设置 AUTO_ACCESS=true 才开启保活
+const WSPATH = process.env.WSPATH || UUID.slice(0, 8);                   // WebSocket 节点路径（不带 /）
+const SUB_PATH = process.env.SUB_PATH || 'd003f8b798f1';                 // 订阅路径（不带 /）
 const NAME = process.env.NAME || 'HuggingFace';                          // 节点名称
 const PORT = Number(process.env.PORT) || 7860;                           // HTTP + WS 监听端口
 
@@ -25,7 +25,7 @@ let ISP = 'Unknown';
 (async () => {
   try {
     const res = await axios.get('https://speed.cloudflare.com/meta', { timeout: 5000 });
-    const data = res.data;
+    const data = res.data || {};
     ISP = `${data.country || 'XX'}-${data.asOrganization || 'Unknown'}`.replace(/ /g, '_');
   } catch (e) {
     ISP = 'Unknown';
@@ -34,30 +34,36 @@ let ISP = 'Unknown';
 
 // ====== 工具函数 ======
 
-// 简单判断 IPv4/IPv6
+const textDecoder = new TextDecoder();
+
+// simple ip check
 function isIp(str) {
   return net.isIP(str) !== 0;
 }
 
-// 判断是否为内网地址，防 SSRF
+// SSRF 防护：判断是否内网 IP
 function isPrivateIp(ip) {
   if (!isIp(ip)) return false;
-  // IPv4 私网段
+
+  // IPv4 私网段 + 回环
   if (/^(10\.|127\.)/.test(ip)) return true;
   if (/^192\.168\./.test(ip)) return true;
   if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true;
-  // 简单处理 IPv6 内网
+
+  // IPv6 回环/链路本地/ULA
   if (ip === '::1') return true;
   if (/^fc00:/i.test(ip) || /^fd00:/i.test(ip) || /^fe80:/i.test(ip)) return true;
+
   return false;
 }
 
-// 解析域名到 IPv4，失败则返回原 host
+// 解析域名 → IPv4，内部带 SSRF 防护；失败返回原 host 让系统决定
 async function resolveHost(host) {
-  // 已经是 IP 的话直接返回
-  if (isIp(host)) return host;
+  if (isIp(host)) {
+    if (isPrivateIp(host)) throw new Error('blocked private ip');
+    return host;
+  }
 
-  // 明显本机 / 本地网络的域名直接拒绝
   const lower = host.toLowerCase();
   if (lower === 'localhost' || lower.endsWith('.local')) {
     throw new Error('blocked local hostname');
@@ -73,16 +79,13 @@ async function resolveHost(host) {
       return ip;
     }
     return host;
-  } catch (e) {
-    // 解析失败时退回原 host，由系统自己解析
+  } catch (_) {
+    // DNS 失败时退回由系统自行解析
     return host;
   }
 }
 
-// 全局 TextDecoder
-const textDecoder = new TextDecoder();
-
-// 去掉 UUID 中的连字符，作为 VLESS 验证用
+// 去掉 UUID 中的连字符，用于 VLESS 身份验证
 const uuidHex = UUID.replace(/-/g, "");
 
 // ====== HTTP Server：主页 + 订阅 ======
@@ -99,14 +102,19 @@ const httpServer = http.createServer((req, res) => {
       res.end(content);
     });
     return;
-  } else if (req.url === `/${SUB_PATH}`) {
+  }
+
+  if (req.url === `/${SUB_PATH}`) {
     const tag = encodeURIComponent(`${NAME}-${ISP}`);
     const vlessURL =
-      `vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&` +
-      `sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${tag}`;
+      `vless://${UUID}@${DOMAIN}:443?` +
+      `encryption=none&security=tls&sni=${DOMAIN}` +
+      `&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${tag}`;
+
     const trojanURL =
-      `trojan://${UUID}@${DOMAIN}:443?security=tls&` +
-      `sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${tag}`;
+      `trojan://${UUID}@${DOMAIN}:443?` +
+      `security=tls&sni=${DOMAIN}` +
+      `&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${tag}`;
 
     const subscription = `${vlessURL}\n${trojanURL}`;
     const base64Content = Buffer.from(subscription).toString('base64');
@@ -124,13 +132,14 @@ const wss = new WebSocketServer({ server: httpServer });
 
 // VLESS 处理
 function handleVlessConnection(ws, msg) {
-  const [VERSION] = msg;
+  const VERSION = msg[0];
   const id = msg.slice(1, 17);
 
   // 校验 UUID
   const valid = id.every((v, i) => v === parseInt(uuidHex.substr(i * 2, 2), 16));
   if (!valid) return false;
 
+  // 解析 header length
   let i = msg.slice(17, 18).readUInt8() + 19;
   const port = msg.slice(i, i += 2).readUInt16BE(0);
   const ATYP = msg.slice(i, i += 1).readUInt8();
@@ -147,19 +156,18 @@ function handleVlessConnection(ws, msg) {
   } else if (ATYP === 3) {
     // IPv6
     const raw = msg.slice(i, i += 16);
-    host = [];
+    const parts = [];
     for (let j = 0; j < 16; j += 2) {
-      host.push(raw.readUInt16BE(j).toString(16));
+      parts.push(raw.readUInt16BE(j).toString(16));
     }
-    host = host.join(':');
+    host = parts.join(':');
   } else {
     return false;
   }
 
-  // SSRF 防护
   if (isPrivateIp(host)) return false;
 
-  // 回应客户端
+  // 回应客户端：VERSION, 0
   ws.send(new Uint8Array([VERSION, 0]));
 
   const duplex = createWebSocketStream(ws, { encoding: 'binary' });
@@ -172,7 +180,7 @@ function handleVlessConnection(ws, msg) {
       }
       this.setNoDelay(true);
 
-      // 双向管道 + 清理
+      // 双向管道
       duplex.pipe(this);
       this.pipe(duplex);
 
@@ -188,7 +196,7 @@ function handleVlessConnection(ws, msg) {
     });
 
     socket.on('error', () => {
-      try { ws.close(); } catch (e) {}
+      try { ws.close(); } catch { }
     });
   };
 
@@ -230,15 +238,19 @@ function handleTrojanConnection(ws, msg) {
     offset += 1;
 
     let host, port;
+
     if (atyp === 0x01) {
+      // IPv4
       host = msg.slice(offset, offset + 4).join('.');
       offset += 4;
     } else if (atyp === 0x03) {
+      // 域名
       const hostLen = msg[offset];
       offset += 1;
       host = msg.slice(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
+      // IPv6
       const raw = msg.slice(offset, offset + 16);
       const parts = [];
       for (let j = 0; j < 16; j += 2) {
@@ -257,7 +269,6 @@ function handleTrojanConnection(ws, msg) {
       offset += 2;
     }
 
-    // SSRF 防护
     if (isPrivateIp(host)) return false;
 
     const duplex = createWebSocketStream(ws, { encoding: 'binary' });
@@ -284,7 +295,7 @@ function handleTrojanConnection(ws, msg) {
       });
 
       socket.on('error', () => {
-        try { ws.close(); } catch (e) {}
+        try { ws.close(); } catch { }
       });
     };
 
@@ -293,23 +304,38 @@ function handleTrojanConnection(ws, msg) {
       .catch(() => connectAndPipe(host));
 
     return true;
-  } catch (e) {
+  } catch (_) {
     return false;
   }
 }
 
-// WS 连接处理：限制 path，只处理 WSPATH
+// WS 连接处理：限制 path，对 v2rayN 友好
 wss.on('connection', (ws, req) => {
   const url = req.url || '/';
-  
- // 允许 /WSPATH   /WSPATH/   /WSPATH?... 
-  if (!(url === `/${WSPATH}` || url.startsWith(`/${WSPATH}/`) || url.startsWith(`/${WSPATH}?`))) {
-      ws.close();
-      return;
+
+  // 允许：
+  // /WSPATH
+  // /WSPATH/
+  // /WSPATH?...
+  // /WSPATH/... （兼容某些 padding 用法）
+  if (
+    !(
+      url === `/${WSPATH}` ||
+      url.startsWith(`/${WSPATH}/`) ||
+      url.startsWith(`/${WSPATH}?`)
+    )
+  ) {
+    ws.close();
+    return;
   }
 
-  ws.once('message', (msg) => {
-    // VLESS: 第一个字节 VERSION，后面 16 字节 ID
+  ws.once('message', (rawMsg) => {
+    let msg = rawMsg;
+    if (typeof msg === 'string') {
+      msg = Buffer.from(msg);
+    }
+
+    // VLESS: 第一个字节 VERSION=0，后 16 字节为 UUID
     if (msg.length > 17 && msg[0] === 0) {
       const id = msg.slice(1, 17);
       const isVless = id.every((v, i) => v === parseInt(uuidHex.substr(i * 2, 2), 16));
@@ -321,12 +347,12 @@ wss.on('connection', (ws, req) => {
       }
     }
 
-    // 尝试当作 Trojan
+    // 否则尝试 Trojan
     if (!handleTrojanConnection(ws, msg)) {
       ws.close();
     }
   }).on('error', () => {
-    try { ws.close(); } catch (e) {}
+    try { ws.close(); } catch { }
   });
 });
 
@@ -340,16 +366,21 @@ async function addAccessTask() {
     await axios.post(
       'https://oooo.serv00.net/add-url',
       { url: fullURL },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 5000 }
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 5000
+      }
     );
     console.log('Automatic Access Task added successfully');
-  } catch (error) {
-    // 静默失败即可
+  } catch (_) {
+    // 静默失败
   }
 }
 
 // 启动 HTTP + WS 服务
 httpServer.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}, ws path: /${WSPATH}, sub path: /${SUB_PATH}`);
+  console.log(
+    `Server is running on port ${PORT}, ws path: /${WSPATH}, sub path: /${SUB_PATH}`
+  );
   addAccessTask();
 });
