@@ -301,9 +301,11 @@ function handleTrojanConnection(ws, msg) {
 // WS 连接处理：限制 path，只处理 WSPATH
 wss.on('connection', (ws, req) => {
   const url = req.url || '/';
-  if (!url.startsWith(`/${WSPATH}`)) {
-    ws.close();
-    return;
+  
+ // 允许 /WSPATH   /WSPATH/   /WSPATH?... 
+  if (!(url === `/${WSPATH}` || url.startsWith(`/${WSPATH}/`) || url.startsWith(`/${WSPATH}?`))) {
+      ws.close();
+      return;
   }
 
   ws.once('message', (msg) => {
